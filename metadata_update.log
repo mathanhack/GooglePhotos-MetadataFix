@@ -1,9 +1,0 @@
-2025-07-12 10:03:56,852 - INFO - Starting metadata update in /tmp/test_photos (DRY RUN)
-2025-07-12 10:03:56,852 - INFO - Using 4 worker threads
-2025-07-12 10:03:56,852 - INFO - Found 1 files to process
-2025-07-12 10:03:56,852 - INFO - Caching JSON files in /tmp/test_photos...
-2025-07-12 10:03:56,852 - INFO - Cached 1 JSON files
-2025-07-12 10:03:56,853 - INFO - Would update /tmp/test_photos/test_album/test_image.jpg with timestamp 2021-01-01 00:00:00
-2025-07-12 10:03:56,853 - INFO - Progress: 1/1 files processed (100.0%)
-2025-07-12 10:03:56,853 - INFO - Completed: 1/1 files successfully processed
-2025-07-12 10:03:56,853 - INFO - Dry run completed: Would update 1 of 1 files
