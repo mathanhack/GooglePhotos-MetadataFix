@@ -14,7 +14,26 @@ This utility scans through directories of exported Google Photos media, finds th
 - **Smart matching** between media files and their JSON metadata
 - **Support for multiple file formats** (JPEG, PNG, MP4, etc.)
 - **Multi-threaded processing** for fast performance
+- **USB drive optimization** - automatically detects and optimizes for USB/removable drives
+- **Enhanced error handling** - retry mechanisms for unreliable connections
+- **Drive accessibility validation** - ensures target drive is accessible before processing
 - **Dry run mode** to preview changes without modifying files
 - **Detailed logging** of all operations
 - **Progress reporting** during processing
 - **Handles edited photos and duplicates** intelligently
+
+## USB Drive Support
+
+The tool automatically detects when you're processing files on a USB drive or other removable media and applies optimizations for better reliability:
+
+- **Automatic detection** of USB/removable drives based on mount points
+- **Reduced thread count** for better stability on slower USB connections
+- **Enhanced error handling** with retry mechanisms for USB disconnections
+- **Drive accessibility validation** before and during processing
+- **More frequent progress updates** for longer-running USB operations
+
+Common USB mount points that are automatically detected:
+- `/media/` (Linux)
+- `/mnt/` (Linux)
+- `/Volumes/` (macOS)
+- Paths containing keywords like "removable", "usb", or "external"

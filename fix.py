@@ -3,6 +3,7 @@ import json
 import sys
 import logging
 import re
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import argparse
@@ -24,7 +25,53 @@ SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.mp4'
 # Regex patterns
 STEM_REGEX = r'.*\(\d+\)\..*'
 
-def get_alike_regex(filename):
+def validate_drive_access(path):
+    """Validate that the drive/path is accessible and writable."""
+    try:
+        # Check if path exists and is accessible
+        if not os.path.exists(path):
+            logging.error(f"Path does not exist: {path}")
+            return False
+        
+        if not os.path.isdir(path):
+            logging.error(f"Path is not a directory: {path}")
+            return False
+        
+        # Check if we can read the directory
+        try:
+            os.listdir(path)
+        except PermissionError:
+            logging.error(f"Permission denied accessing: {path}")
+            return False
+        except OSError as e:
+            logging.error(f"Drive access error for {path}: {e}")
+            return False
+        
+        # For USB drives, check if it's still mounted by testing write access
+        test_file = os.path.join(path, '.metadata_fix_test')
+        try:
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            logging.debug(f"Drive access validated for: {path}")
+            return True
+        except (OSError, IOError) as e:
+            logging.warning(f"Drive may be read-only or disconnected: {path} - {e}")
+            return False
+    
+    except Exception as e:
+        logging.error(f"Unexpected error validating drive access: {e}")
+        return False
+
+def check_drive_during_processing(path):
+    """Check if drive is still accessible during processing."""
+    try:
+        # Quick check - try to access the directory
+        os.listdir(path)
+        return True
+    except (OSError, IOError) as e:
+        logging.error(f"Drive became inaccessible during processing: {path} - {e}")
+        return False
     """Generate regex to match JSON files with time-based naming pattern."""
     tokens = filename.split(".")
     name = re.escape(".".join(tokens[0:len(tokens) - 1]))
@@ -143,9 +190,14 @@ def get_json_data(image_path, json_files_cache):
 
 def update_image_metadata(args):
     """Update image metadata with timestamp from JSON file."""
-    image_path, json_files_cache, dry_run = args
+    image_path, json_files_cache, dry_run, base_path = args
     
     try:
+        # Check if drive is still accessible
+        if not check_drive_during_processing(base_path):
+            logging.error(f"Drive disconnected, skipping: {image_path}")
+            return False
+        
         # Get the timestamp from the JSON file
         json_data = get_json_data(image_path, json_files_cache)
         if not json_data:
@@ -162,10 +214,20 @@ def update_image_metadata(args):
             logging.info(f"Would update {image_path} with timestamp {formatted_time}")
             return True
         
-        # Update the image's creation time
-        os.utime(image_path, (timestamp, timestamp))
-        logging.debug(f"Updated {image_path} with timestamp {formatted_time}")
-        return True
+        # Update the image's creation time with retry for USB drives
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                os.utime(image_path, (timestamp, timestamp))
+                logging.debug(f"Updated {image_path} with timestamp {formatted_time}")
+                return True
+            except (OSError, IOError) as e:
+                if attempt < max_retries - 1:
+                    logging.warning(f"Retry {attempt + 1}/{max_retries} for {image_path}: {e}")
+                    time.sleep(0.5)  # Brief pause before retry
+                else:
+                    logging.error(f"Failed to update {image_path} after {max_retries} attempts: {e}")
+                    return False
     
     except Exception as e:
         logging.error(f"Error updating metadata for {image_path}: {str(e)}")
@@ -182,9 +244,18 @@ def count_files(path):
 
 def process_directory(path, dry_run=False, max_workers=4):
     """Process all supported files in the directory."""
+    # Validate drive access first
+    if not validate_drive_access(path):
+        logging.error(f"Cannot access or write to drive: {path}")
+        return 0, 0
+    
     # Count files for progress reporting
     total_files = count_files(path)
     logging.info(f"Found {total_files} files to process")
+    
+    if total_files == 0:
+        logging.info("No supported files found to process")
+        return 0, 0
     
     # Cache JSON files
     json_files_cache = cache_json_files(path)
@@ -200,9 +271,14 @@ def process_directory(path, dry_run=False, max_workers=4):
     processed = 0
     successful = 0
     
+    # Adjust thread count for USB drives (reduce for better stability)
+    if is_likely_usb_drive(path):
+        max_workers = min(max_workers, 2)  # Reduce threads for USB drives
+        logging.info(f"Detected possible USB drive, reducing threads to {max_workers}")
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Create a list of arguments for each file
-        args_list = [(file_path, json_files_cache, dry_run) for file_path in image_files]
+        args_list = [(file_path, json_files_cache, dry_run, path) for file_path in image_files]
         
         # Process files and track progress
         for result in executor.map(update_image_metadata, args_list):
@@ -210,13 +286,40 @@ def process_directory(path, dry_run=False, max_workers=4):
             if result:
                 successful += 1
             
-            # Report progress every 100 files or at completion
-            if processed % 100 == 0 or processed == total_files:
+            # Report progress more frequently for USB drives (every 50 files instead of 100)
+            progress_interval = 50 if is_likely_usb_drive(path) else 100
+            if processed % progress_interval == 0 or processed == total_files:
                 percent = (processed / total_files) * 100 if total_files > 0 else 0
                 logging.info(f"Progress: {processed}/{total_files} files processed ({percent:.1f}%)")
     
     logging.info(f"Completed: {successful}/{total_files} files successfully processed")
     return successful, total_files
+
+def is_likely_usb_drive(path):
+    """Heuristic to detect if path is likely on a USB drive."""
+    try:
+        # Check common USB mount points
+        usb_indicators = ['/media/', '/mnt/', '/Volumes/']
+        path_lower = path.lower()
+        
+        for indicator in usb_indicators:
+            if indicator in path_lower:
+                return True
+        
+        # Check filesystem type or other characteristics
+        try:
+            import shutil
+            total, used, free = shutil.disk_usage(path)
+            # Additional check: look for removable media keywords in path
+            removable_keywords = ['removable', 'usb', 'external']
+            if any(keyword in path_lower for keyword in removable_keywords):
+                return True
+        except:
+            pass
+        
+        return False
+    except:
+        return False
 
 def main():
     """Main function to parse arguments and run the script."""
@@ -232,10 +335,22 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
+    # Expand path to handle relative paths and resolve symlinks
+    args.path = os.path.abspath(os.path.expanduser(args.path))
+    
     # Validate path
-    if not os.path.isdir(args.path):
-        logging.error(f"Directory not found: {args.path}")
+    if not os.path.exists(args.path):
+        logging.error(f"Path does not exist: {args.path}")
         return 1
+    
+    if not os.path.isdir(args.path):
+        logging.error(f"Path is not a directory: {args.path}")
+        return 1
+    
+    # Check if it's likely a USB drive and provide helpful info
+    if is_likely_usb_drive(args.path):
+        logging.info(f"Processing files on what appears to be a USB/removable drive: {args.path}")
+        logging.info("USB drive detected - using optimized settings for better reliability")
     
     logging.info(f"Starting metadata update in {args.path}" + (" (DRY RUN)" if args.dry_run else ""))
     logging.info(f"Using {args.threads} worker threads")
@@ -249,7 +364,7 @@ def main():
     else:
         logging.info(f"Update completed: Updated {successful} of {total} files")
     
-    return 0
+    return 0 if successful == total else 1
 
 if __name__ == "__main__":
     sys.exit(main())
